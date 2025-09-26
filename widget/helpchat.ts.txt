@@ -1,0 +1,237 @@
+/* Tiny, framework-free, Shadow DOM widget (<20KB gz aim)
+ * Emits analytics via `window.dispatchEvent(new CustomEvent('helpchat',{detail:{event,...}}))`
+ */
+(() => {
+  const SCRIPT = Array.from(document.scripts).find(s => /helpchat(\.js)?(\?|$)/.test(s.src))!;
+  const SITE_KEY = SCRIPT?.dataset.sitekey || '';
+  const API_BASE = SCRIPT?.dataset.apiBase || (new URL(SCRIPT.src)).origin;
+  const LOCALE = navigator.language || 'en';
+  const ORIGIN = window.location.origin;
+
+  if (!SITE_KEY) {
+    console.warn('[helpchat] missing data-sitekey');
+    return;
+  }
+
+  // State
+  let token: string | null = null;
+  let tokenExp = 0;
+  let cfg: any = null;
+  let open = false;
+  let lastBotId = 0;
+
+  // Shadow root
+  const host = document.createElement('div');
+  host.setAttribute('data-helpchat', '');
+  const shadow = host.attachShadow({ mode: 'open' });
+  document.body.appendChild(host);
+
+  // Styles (scoped)
+  const style = document.createElement('style');
+  style.textContent = `
+:host { all: initial; }
+* { box-sizing: border-box; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, 'Helvetica Neue', Arial, 'Noto Sans', 'Apple Color Emoji','Segoe UI Emoji'; }
+button { cursor: pointer; }
+.hc-launcher {
+  position: fixed; right: 16px; bottom: 16px; width: 56px; height: 56px;
+  border-radius: 50%; border: none; background: #111; color: #fff; box-shadow: 0 6px 20px rgba(0,0,0,.25);
+}
+.hc-panel {
+  position: fixed; right: 16px; bottom: 84px; width: min(360px, 90vw); height: 520px;
+  background: #fff; border-radius: 12px; box-shadow: 0 12px 36px rgba(0,0,0,.25);
+  display: none; flex-direction: column; overflow: hidden; border: 1px solid #e5e7eb;
+}
+.hc-panel.open { display: flex; }
+.hc-header { padding: 12px 16px; background: #111; color: #fff; display: flex; align-items: center; justify-content: space-between; }
+.hc-title { font-weight: 600; }
+.hc-close { background: transparent; color: #fff; border: none; font-size: 18px; }
+.hc-messages { padding: 12px; flex: 1; overflow: auto; }
+.hc-msg { margin: 8px 0; }
+.hc-user { text-align: right; }
+.hc-bot { text-align: left; }
+.hc-bubble { display: inline-block; padding: 8px 10px; border-radius: 10px; max-width: 90%; white-space: pre-wrap; word-break: break-word; }
+.hc-bubble.user { background: #111; color: #fff; }
+.hc-bubble.bot { background: #f3f4f6; color: #111; }
+.hc-input { display: flex; gap: 8px; padding: 12px; border-top: 1px solid #e5e7eb; }
+.hc-input input { flex: 1; padding: 10px; border: 1px solid #d1d5db; border-radius: 8px; }
+.hc-input button { padding: 10px 12px; border: none; border-radius: 8px; background: #111; color: #fff; }
+.hc-powered { font-size: 12px; color: #6b7280; padding: 0 12px 12px; }
+.hc-feedback { display: flex; gap: 6px; margin-top: 6px; }
+.hc-thumb { background: transparent; border: none; font-size: 14px; }
+.hc-sr-only { position: absolute; left: -9999px; }
+  `;
+  shadow.appendChild(style);
+
+  // DOM
+  const panel = document.createElement('div');
+  panel.className = 'hc-panel';
+  panel.setAttribute('role', 'dialog');
+  panel.setAttribute('aria-modal', 'true');
+  panel.setAttribute('aria-label', 'Help chat');
+  const header = document.createElement('div'); header.className = 'hc-header';
+  const title = document.createElement('div'); title.className = 'hc-title';
+  const close = document.createElement('button'); close.className = 'hc-close'; close.innerHTML = '✕'; close.setAttribute('aria-label', 'Close chat');
+  header.appendChild(title); header.appendChild(close);
+
+  const messages = document.createElement('div'); messages.className = 'hc-messages'; messages.setAttribute('aria-live', 'polite');
+  const inputRow = document.createElement('div'); inputRow.className = 'hc-input';
+  const label = document.createElement('label'); label.className = 'hc-sr-only'; label.setAttribute('for', 'hc-input'); label.textContent = 'Type your message';
+  const input = document.createElement('input'); input.id = 'hc-input'; input.type = 'text'; input.placeholder = 'Type a message…';
+  const send = document.createElement('button'); send.textContent = 'Send'; send.setAttribute('aria-label', 'Send message');
+  inputRow.append(label, input, send);
+
+  const powered = document.createElement('div'); powered.className = 'hc-powered';
+
+  panel.append(header, messages, inputRow, powered);
+
+  const launcher = document.createElement('button');
+  launcher.className = 'hc-launcher';
+  launcher.setAttribute('aria-haspopup', 'dialog');
+  launcher.setAttribute('aria-expanded', 'false');
+  launcher.innerHTML = '💬';
+  shadow.append(panel, launcher);
+
+  // Analytics
+  function emit(event: string, data: any = {}) {
+    window.dispatchEvent(new CustomEvent('helpchat', { detail: { event, siteKey: SITE_KEY, ...data } }));
+  }
+
+  // Focus trap
+  function trapFocus(e: KeyboardEvent) {
+    if (!open) return;
+    if (e.key === 'Escape') {
+      hide();
+      e.preventDefault();
+      return;
+    }
+    if (e.key !== 'Tab') return;
+    const f = Array.from(panel.querySelectorAll<HTMLElement>('button, [href], input')).filter(el => !el.hasAttribute('disabled'));
+    if (!f.length) return;
+    const first = f[0], last = f[f.length - 1];
+    if (e.shiftKey && document.activeElement === first) { last.focus(); e.preventDefault(); }
+    else if (!e.shiftKey && document.activeElement === last) { first.focus(); e.preventDefault(); }
+  }
+
+  // API helpers
+  async function fetchJSON(url: string, init?: RequestInit) {
+    const r = await fetch(url, { credentials: 'include', ...init });
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+  }
+  async function ensureAuth() {
+    const now = Math.floor(Date.now() / 1000);
+    if (token && tokenExp - 10 > now) return;
+    const referer = location.href;
+    const t = await fetchJSON(`${API_BASE}/token`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'referer': referer },
+      body: JSON.stringify({ siteKey: SITE_KEY, origin: ORIGIN })
+    });
+    token = t.token; tokenExp = t.exp;
+  }
+
+  // UI helpers
+  function addMessage(text: string, who: 'user'|'bot') {
+    const row = document.createElement('div'); row.className = `hc-msg hc-${who}`;
+    const bubble = document.createElement('div'); bubble.className = `hc-bubble ${who}`; bubble.innerText = text;
+    row.appendChild(bubble);
+    if (who === 'bot') {
+      lastBotId++;
+      const fb = document.createElement('div'); fb.className = 'hc-feedback';
+      const up = document.createElement('button'); up.className = 'hc-thumb'; up.title = 'Helpful'; up.textContent = '👍';
+      const down = document.createElement('button'); down.className = 'hc-thumb'; down.title = 'Not helpful'; down.textContent = '👎';
+      up.addEventListener('click', () => sendFeedback(lastBotId, 1));
+      down.addEventListener('click', () => {
+        const c = prompt('Tell us what was wrong (optional):') || '';
+        sendFeedback(lastBotId, -1, c);
+      });
+      fb.append(up, down);
+      row.appendChild(fb);
+    }
+    messages.appendChild(row);
+    messages.scrollTop = messages.scrollHeight;
+  }
+
+  function show() {
+    panel.classList.add('open'); launcher.setAttribute('aria-expanded', 'true'); open = true;
+    emit('open');
+    setTimeout(() => input.focus(), 0);
+  }
+  function hide() {
+    panel.classList.remove('open'); launcher.setAttribute('aria-expanded', 'false'); open = false;
+    emit('close'); launcher.focus();
+  }
+
+  // Events
+  launcher.addEventListener('click', async () => {
+    if (open) hide(); else show();
+  });
+  close.addEventListener('click', hide);
+  shadow.addEventListener('keydown', trapFocus);
+  send.addEventListener('click', onSend);
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') onSend(); });
+
+  async function onSend() {
+    const msg = input.value.trim();
+    if (!msg) return;
+    input.value = '';
+    addMessage(msg, 'user');
+    emit('message_user', { text: msg });
+
+    try {
+      await ensureAuth();
+      const r = await fetchJSON(`${API_BASE}/answer`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'authorization': `Bearer ${token}`,
+          'referer': location.href
+        },
+        body: JSON.stringify({ siteKey: SITE_KEY, origin: ORIGIN, message: msg, locale: LOCALE })
+      });
+      const text = String(r.answer || '');
+      addMessage(text, 'bot');
+      emit('message_bot', { text, refusal: !!r.refusal, sources: r.sources || [] });
+    } catch (e: any) {
+      addMessage('Sorry, something went wrong.', 'bot');
+      console.error('[helpchat]', e);
+    }
+  }
+
+  async function sendFeedback(messageId: number, rating: 1 | -1, comment = '') {
+    try {
+      await ensureAuth();
+      await fetchJSON(`${API_BASE}/feedback`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'authorization': `Bearer ${token}`,
+          'referer': location.href
+        },
+        body: JSON.stringify({ siteKey: SITE_KEY, origin: ORIGIN, messageId, rating, comment })
+      });
+      emit('feedback', { messageId, rating, comment });
+    } catch (e) {
+      console.warn('[helpchat] feedback failed', e);
+    }
+  }
+
+  // Boot: load config & set branding/welcome
+  (async () => {
+    try {
+      cfg = await fetchJSON(`${API_BASE}/config?siteKey=${encodeURIComponent(SITE_KEY)}`);
+      title.textContent = cfg.brandText || 'Help';
+      powered.textContent = `Powered by ${cfg.brandText || 'HelpChat'}`;
+      // Lazy welcome: show bot greeting on first open
+      launcher.addEventListener('click', () => {
+        if (messages.childElementCount === 0 && cfg.welcomeText) {
+          addMessage(cfg.welcomeText, 'bot');
+        }
+      }, { once: true });
+    } catch (e) {
+      title.textContent = 'Help';
+      powered.textContent = 'Powered by HelpChat';
+      console.warn('[helpchat] config failed', e);
+    }
+  })();
+})();

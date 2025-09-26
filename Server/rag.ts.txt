@@ -1,0 +1,10 @@
+export async function retrieve(query: string, siteKey: string, limit = 3) {
+  const STORE = {
+    "ACME_PROD_001": [
+      { title: "About Us", url: "https://example.com/about", text: "We are ACME. We make widgets." },
+      { title: "Support", url: "https://example.com/support", text: "Contact support at support@example.com" }
+    ]
+  };
+  const hay = STORE[siteKey] || [];
+  return hay.slice(0, limit);
+}

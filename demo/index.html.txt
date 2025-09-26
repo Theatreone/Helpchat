@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>HelpChat Demo</title>
+</head>
+<body>
+  <h1>HelpChat Demo</h1>
+  <p>Try asking: “How do I contact support?”</p>
+
+  <script defer src="/helpchat.js" data-sitekey="ACME_PROD_001"></script>
+</body>
+</html>

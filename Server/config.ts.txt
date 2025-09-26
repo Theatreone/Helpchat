@@ -1,0 +1,11 @@
+export const CONFIGS: Record<string, any> = {
+  "ACME_PROD_001": {
+    siteKey: "ACME_PROD_001",
+    allowedDomains: (process.env.ALLOWED_DOMAINS || "").split(",").map(s => s.trim()),
+    brandText: process.env.ORG_NAME || "Your Org",
+    languages: ["en"],
+    welcomeText: process.env.DEFAULT_WELCOME || "Hi! How can we help?",
+    escalationEmail: process.env.ESCALATION_EMAIL || "support@example.com",
+    escalationUrl: undefined
+  }
+};
